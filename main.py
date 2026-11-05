@@ -464,6 +464,24 @@ async def chat(request: Request):
             for tu in tool_uses:
                 inp = tu.input
 
+                     # ── write_file: stream code blocks ──────────
+                if tu.name == "write_file":
+                    filename = inp.get("filename", "")
+                    content  = inp.get("content",  "")
+                    ext      = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+
+                    yield f"data: {json.dumps({'type':'tool_start','tool':tu.name,'filename':filename,'ext':ext,'cmd':filename})}\n\n"
+
+                    chunk_size = 60
+                    for i in range(0, len(content), chunk_size):
+                        yield f"data: {json.dumps({'type':'tool_chunk','kind':'code','text':content[i:i+chunk_size]})}\n\n"
+
+                    result = do_write(filename, content)
+                    m      = re.search(r'(\d[\d,]+) bytes', result)
+                    sz     = int(m.group(1).replace(',','')) if m else 0
+
+                    yield f"data: {json.dumps({'type':'tool_end','tool':tu.name,'filename':filename,'size':sz,'status':'ok'})}\n\n"
+
                 # ── all other tools: stream output lines ─────
                     cmd = (
                         inp.get("command","")            if tu.name == "run_shell"    else
