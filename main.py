@@ -465,7 +465,6 @@ async def chat(request: Request):
                 inp = tu.input
 
                 # ── all other tools: stream output lines ─────
-                else:
                     cmd = (
                         inp.get("command","")            if tu.name == "run_shell"    else
                         inp.get("code","").split("\n")[0][:120] if tu.name == "run_python" else
