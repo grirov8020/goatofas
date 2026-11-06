@@ -576,6 +576,10 @@ async def autonomous_scan(request: Request):
         return JSONResponse(content=report)
     
         )
+
+
+ tool_uses = [b for b in response.content if b.type == "tool_use"]
+
 # ── MAIN CHAT ────────────────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)
