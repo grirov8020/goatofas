@@ -574,11 +574,6 @@ async def autonomous_scan(request: Request):
         report = await orchestrator.execute_autonomous_scan(target)
         
         return JSONResponse(content=report)
-    
-        )
-
-
- tool_uses = [b for b in response.content if b.type == "tool_use"]
 
 # ── MAIN CHAT ────────────────────────────────────────────────
 
