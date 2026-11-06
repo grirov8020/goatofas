@@ -575,6 +575,11 @@ async def autonomous_scan(request: Request):
         
         return JSONResponse(content=report)
 
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e), "traceback": traceback.format_exc()}
+        )
 # ── MAIN CHAT ────────────────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)
