@@ -153,6 +153,172 @@ TOOLS = [
     }
 ]
 
+# ── TOOL EXECUTORS (unchanged) ────────────────────────────────
+def exec_shell(command: str, timeout: int = 120) -> str:
+    timeout = min(int(timeout), 300)
+    try:
+        result = subprocess.run(
+            command, shell=True, capture_output=True, text=True, timeout=timeout, cwd=str(WORKSPACE),
+            env={**os.environ, "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/go/bin:/root/go/bin"}
+        )
+        out = (result.stdout + result.stderr).strip()
+        if len(out) > 8000: out = out[:4000]+"\n...[TRUNCATED]...\n"+out[-3000:]
+        return out or "(no output)"
+    except subprocess.TimeoutExpired: return f"[TIMEOUT after {timeout}s]"
+    except Exception as e: return f"[ERROR] {e}"
+
+def exec_python(code: str, timeout: int = 60) -> str:
+    timeout = min(int(timeout), 120)
+    try:
+        script = WORKSPACE / "_exec.py"
+        script.write_text(code)
+        result = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, timeout=timeout, cwd=str(WORKSPACE))
+        out = (result.stdout + result.stderr).strip()
+        if len(out) > 8000: out = out[:4000]+"\n...[TRUNCATED]...\n"+out[-3000:]
+        return out or "(no output)"
+    except subprocess.TimeoutExpired: return f"[TIMEOUT after {timeout}s]"
+    except Exception as e: return f"[ERROR] {traceback.format_exc()}"
+
+def do_write(filename: str, content: str) -> str:
+    path = WORKSPACE / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    return f"✓ Written {path.stat().st_size:,} bytes -> workspace/{filename}"
+
+def do_read(filename: str, max_lines: int = 200) -> str:
+    path = WORKSPACE / filename
+    if not path.exists(): return f"[Not found: {filename}]"
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    if len(lines) > max_lines:
+        return "\n".join(lines[:max_lines]) + f"\n...[{len(lines)-max_lines} more lines]"
+    return "\n".join(lines)
+
+def do_list() -> str:
+    rows = []
+    for fp in sorted(WORKSPACE.rglob("*")):
+        if fp.is_file() and not fp.name.startswith("_") and not fp.name.startswith("."):
+            rel = fp.relative_to(WORKSPACE)
+            rows.append(f"  {rel} ({fp.stat().st_size:,}b) -> /download/{rel}")
+    return "\n".join(rows) if rows else "(workspace empty)"
+
+def do_web_search(query: str, num_results: int = 8, include_text: bool = False) -> str:
+    try:
+        num_results = min(int(num_results), 20)
+        if include_text:
+            results = exa.search_and_contents(query, num_results=num_results, use_autoprompt=True, text={"max_characters": 1000})
+        else:
+            results = exa.search(query, num_results=num_results, use_autoprompt=True)
+        if not results.results:
+            return "No results found."
+        out = []
+        for i, r in enumerate(results.results, 1):
+            entry = f"[{i}] {r.title or '(no title)'}\n URL: {r.url}\n Published: {r.published_date or 'unknown'}"
+            if include_text and hasattr(r, 'text') and r.text:
+                entry += f"\n {r.text[:800]}"
+            out.append(entry)
+        return "\n\n".join(out)
+    except Exception as e:
+        return f"[Exa search error] {e}"
+
+def do_web_fetch(url: str, formats: list = None) -> str:
+    try:
+        if formats is None: formats = ["markdown"]
+        result = firecrawl.scrape_url(url, formats=formats)
+        content = ""
+        if hasattr(result, 'markdown') and result.markdown:
+            content = result.markdown
+        elif isinstance(result, dict):
+            content = result.get("markdown") or result.get("content") or str(result)
+        if not content:
+            return f"[Firecrawl] No content returned for {url}"
+        if len(content) > 12000:
+            content = content[:12000] + f"\n\n...[truncated {len(content)-12000} chars]"
+        meta = ""
+        if hasattr(result, 'metadata') and result.metadata:
+            m = result.metadata
+            meta = f"Title: {getattr(m,'title','')}\n\n"
+        elif isinstance(result, dict) and result.get("metadata"):
+            m = result["metadata"]
+            meta = f"Title: {m.get('title','')}\nDescription: {m.get('description','')}\n\n"
+        return f"URL: {url}\n{meta}{content}"
+    except Exception as e:
+        return f"[Firecrawl error] {e}"
+
+def do_search_history(query: str, limit: int = 10) -> str:
+    # Search both legacy JSON and SQLite DB
+    results = []
+    query_lower = query.lower()
+
+    # SQLite search
+    try:
+        db = get_db()
+        rows = db.execute(
+            """SELECT c.title, m.role, m.content, m.created_at
+               FROM messages m JOIN chats c ON c.id = m.chat_id
+               WHERE LOWER(m.content) LIKE ?
+               ORDER BY m.id DESC LIMIT ?""",
+            (f"%{query_lower}%", limit)
+        ).fetchall()
+        db.close()
+        for r in rows:
+            results.append(f"[{r['created_at'][:16]}] [{r['title'][:30]}] {r['role'].upper()}: {r['content'][:300]}")
+    except Exception as e:
+        results.append(f"[DB search error] {e}")
+
+    # Legacy JSON search
+    if HISTORY_F.exists():
+        try:
+            data = json.loads(HISTORY_F.read_text())
+            for conv in data:
+                for msg in conv.get("messages", []):
+                    content = msg.get("content", "")
+                    if isinstance(content, str) and query_lower in content.lower():
+                        results.append(f"[{conv.get('date','')}] [legacy] {msg.get('role','').upper()}: {content[:300]}")
+        except Exception:
+            pass
+
+    if not results:
+        return f"No history found for: '{query}'"
+    return f"Found {len(results)} match(es) for '{query}':\n\n" + "\n---\n".join(results[:limit])
+
+def run_tool(name: str, inp: dict) -> str:
+    if not isinstance(inp, dict):
+        return f"Error: {name} received invalid input (expected an object)"
+    try:
+        if name == "run_shell":
+            command = inp.get("command")
+            if not command: return "Error: run_shell requires 'command' parameter"
+            return exec_shell(command, inp.get("timeout", 120))
+        if name == "run_python":
+            code = inp.get("code")
+            if not code: return "Error: run_python requires 'code' parameter"
+            return exec_python(code, inp.get("timeout", 60))
+        if name == "write_file":
+            filename = inp.get("filename"); content = inp.get("content")
+            if not filename: return "Error: write_file requires 'filename' parameter"
+            if content is None: return "Error: write_file requires 'content' parameter"
+            return do_write(filename, content)
+        if name == "read_file":
+            filename = inp.get("filename")
+            if not filename: return "Error: read_file requires 'filename' parameter"
+            return do_read(filename, inp.get("max_lines", 200))
+        if name == "list_workspace": return do_list()
+        if name == "web_search":
+            query = inp.get("query")
+            if not query: return "Error: web_search requires 'query' parameter"
+            return do_web_search(query, inp.get("num_results", 8), inp.get("include_text", False))
+        if name == "web_fetch":
+            url = inp.get("url")
+            if not url: return "Error: web_fetch requires 'url' parameter"
+            return do_web_fetch(url, inp.get("formats", ["markdown"]))
+        if name == "search_history":
+            query = inp.get("query")
+            if not query: return "Error: search_history requires 'query' parameter"
+            return do_search_history(query, inp.get("limit", 10))
+        return f"[Unknown tool: {name}]"
+    except Exception as e:
+        return f"Tool error: {e}"
+
 # ── DATABASE ─────────────────────────────────────────────────
 
 def get_db() -> sqlite3.Connection:
@@ -409,10 +575,6 @@ async def autonomous_scan(request: Request):
         
         return JSONResponse(content=report)
     
-    except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={"error": str(e), "traceback": traceback.format_exc()}
         )
 # ── MAIN CHAT ────────────────────────────────────────────────
 
@@ -464,25 +626,8 @@ async def chat(request: Request):
             for tu in tool_uses:
                 inp = tu.input
 
-                     # ── write_file: stream code blocks ──────────
-                if tu.name == "write_file":
-                    filename = inp.get("filename", "")
-                    content  = inp.get("content",  "")
-                    ext      = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-
-                    yield f"data: {json.dumps({'type':'tool_start','tool':tu.name,'filename':filename,'ext':ext,'cmd':filename})}\n\n"
-
-                    chunk_size = 60
-                    for i in range(0, len(content), chunk_size):
-                        yield f"data: {json.dumps({'type':'tool_chunk','kind':'code','text':content[i:i+chunk_size]})}\n\n"
-
-                    result = do_write(filename, content)
-                    m      = re.search(r'(\d[\d,]+) bytes', result)
-                    sz     = int(m.group(1).replace(',','')) if m else 0
-
-                    yield f"data: {json.dumps({'type':'tool_end','tool':tu.name,'filename':filename,'size':sz,'status':'ok'})}\n\n"
-
                 # ── all other tools: stream output lines ─────
+                else:
                     cmd = (
                         inp.get("command","")            if tu.name == "run_shell"    else
                         inp.get("code","").split("\n")[0][:120] if tu.name == "run_python" else
